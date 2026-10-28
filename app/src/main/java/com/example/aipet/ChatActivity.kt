@@ -1,3 +1,163 @@
+package com.example.aipet
+
+import android.app.Activity
+import android.content.Intent
+import android.graphics.Color
+import android.graphics.Typeface
+import android.net.Uri
+import android.os.Bundle
+import android.text.InputType
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
+import android.widget.*
+import org.json.JSONObject
+
+class ChatActivity : Activity() {
+    private lateinit var messageColumn: LinearLayout
+    private lateinit var scrollView: ScrollView
+    private lateinit var input: EditText
+    private lateinit var modeLabel: TextView
+    private lateinit var friendStatusLabel: TextView
+    private var mode = PetChatEngine.Mode.LOCAL
+    private var openedSettingsForApi = false
+    private val history = mutableListOf<JSONObject>()
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        buildScreen()
+        val saved = PetChatStore.recent(this, 36)
+        if (saved.isEmpty()) {
+            addMessage("小伙伴", "欢迎回来～聊天记录现在会保存在本机，你可以随时接着聊。", false)
+        } else {
+            saved.forEach { entry -> addMessage(if (entry.role == "user") "你" else PetStateStore.nickname(this), entry.content, entry.role == "user") }
+        }
+        refreshFriendStatus()
+        PetAnimator.react(PetMood.HAPPY, "欢迎回来～", 1300L)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (openedSettingsForApi) {
+            openedSettingsForApi = false
+            if (!ApiKeyStore.load(this).isNullOrBlank()) {
+                mode = PetChatEngine.Mode.API
+                history.clear() // Do not send previously saved/local-mode chat to the provider by surprise.
+                updateModeLabel()
+                Toast.makeText(this, "已切换到独立 AI 模式", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun buildScreen() {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(14), dp(14), dp(10))
+            setBackgroundColor(Color.rgb(255, 248, 252))
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(TextView(this).apply {
+            text = "和${PetStateStore.nickname(this@ChatActivity)}聊天 ✨"
+            textSize = 22f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.rgb(68, 53, 86))
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        header.addView(Button(this).apply {
+            text = "AI 设置"
+            isAllCaps = false
+            setOnClickListener { openSettings() }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)))
+        root.addView(header, matchWrap())
+
+        modeLabel = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.rgb(115, 96, 130))
+            setPadding(dp(2), dp(5), dp(2), dp(5))
+        }
+        root.addView(modeLabel, matchWrap())
+
+        friendStatusLabel = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.rgb(95, 101, 140))
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = bubbleBackground(Color.rgb(246, 249, 255), Color.rgb(227, 235, 255))
+        }
+        root.addView(friendStatusLabel, matchWrap())
+
+        val modeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        modeRow.addView(Button(this).apply {
+            text = "免费本地"
+            isAllCaps = false
+            setOnClickListener { if (mode != PetChatEngine.Mode.LOCAL) history.clear(); mode = PetChatEngine.Mode.LOCAL; updateModeLabel() }
+        }, LinearLayout.LayoutParams(0, dp(44), 1f))
+        modeRow.addView(Button(this).apply {
+            text = "ChatGPT 网页"
+            isAllCaps = false
+            setOnClickListener { openChatGptWeb() }
+        }, LinearLayout.LayoutParams(0, dp(44), 1f))
+        modeRow.addView(Button(this).apply {
+            text = "独立 AI"
+            isAllCaps = false
+            setOnClickListener { selectApiMode() }
+        }, LinearLayout.LayoutParams(0, dp(44), 1f))
+        root.addView(modeRow, matchWrap())
+
+         val tips = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            val tipsContainer = LinearLayout(this@ChatActivity).apply { orientation = LinearLayout.HORIZONTAL }
+            PetChatEngine.suggestions().forEach { suggestion ->
+                tipsContainer.addView(TextView(this@ChatActivity).apply {
+                    text = suggestion
+                    textSize = 13f
+                    setTextColor(Color.rgb(72, 79, 117))
+                    setPadding(dp(12), dp(6), dp(12), dp(6))
+                    background = chipBackground()
+                    setOnClickListener { input.setText(suggestion); input.setSelection(input.text.length) }
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                        rightMargin = dp(8)
+                    }
+                })
+            }
+            addView(tipsContainer)
+        }
+        root.addView(tips, matchWrap())
+
+        scrollView = ScrollView(this).apply {
+            isFillViewport = true
+            clipToPadding = false
+            setPadding(0, dp(8), 0, dp(8))
+        }
+        messageColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(2), dp(2), dp(2), dp(10))
+        }
+        scrollView.addView(messageColumn, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        root.addView(scrollView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        val composer = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        input = EditText(this).apply {
+            hint = "试试说：夸夸我、安慰我、跳一下、晚安…"
+            textSize = 15f
+            minHeight = dp(48)
+            maxLines = 4
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            imeOptions = EditorInfo.IME_ACTION_SEND
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_SEND) { sendMessage(); true } else false
+            }
+        }
+        composer.addView(input, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        composer.addView(Button(this).apply {
+            text = "发送"
+            isAllCaps = false
+            setOnClickListener { sendMessage() }
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(50)))
         root.addView(composer, matchWrap())
 
@@ -38,7 +198,6 @@
         openedSettingsForApi = true
         startActivity(Intent(this, AiSettingsActivity::class.java))
     }
-
     private fun sendMessage() {
         val text = input.text.toString().trim()
         if (text.isEmpty()) return
